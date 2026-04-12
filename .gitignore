@@ -1,0 +1,31 @@
+### Java
+target/
+*.class
+*.jar
+*.war
+
+### IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+### OS
+.DS_Store
+Thumbs.db
+
+### Env
+.env
+
+### Quarkus
+quarkus.log
+/old/
+/ideas.md
+/integratedwiki.md
+/start.txt
+*.log
+/docker-compose.yml
+/setup-db.sh
+/src/main/resources/META-INF/resources/schema.md

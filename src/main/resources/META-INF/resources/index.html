@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Wiki</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --sidebar-width: 300px;
+        }
+        body { background: #f8f9fa; }
+        .sidebar {
+            width: var(--sidebar-width);
+            height: calc(100vh - 56px);
+            position: fixed;
+            top: 56px;
+            left: 0;
+            overflow-y: auto;
+            background: #fff;
+            border-right: 1px solid #dee2e6;
+            padding: 1rem;
+        }
+        .main-content {
+            margin-left: var(--sidebar-width);
+            padding: 1.5rem;
+        }
+        .file-tree .folder { cursor: pointer; }
+        .file-tree .folder > .folder-name::before {
+            content: "📁 ";
+        }
+        .file-tree .folder.collapsed > .folder-name::before {
+            content: "📂 ";
+        }
+        .file-tree .file {
+            cursor: pointer;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .file-tree .file:hover { background: #e9ecef; }
+        .file-tree .file::before {
+            content: "📄 ";
+        }
+        .file-tree .file.active {
+            background: #0d6efd;
+            color: #fff;
+        }
+        .file-tree .children { padding-left: 1.2rem; }
+        .file-tree .folder.collapsed > .children { display: none; }
+        #file-content {
+            background: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 1.5rem;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+        .tab-pane { min-height: 400px; }
+        .result-box {
+            background: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+            white-space: pre-wrap;
+        }
+        .nav-tabs .nav-link { color: #495057; }
+        .nav-tabs .nav-link.active { font-weight: 600; }
+        .badge-category { font-size: 0.75rem; }
+        .loading { opacity: 0.6; }
+        .loading::after { content: " ⏳"; }
+    </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-dark bg-dark px-3">
+    <span class="navbar-brand mb-0 h5"><i class="bi bi-book"></i> LLM Wiki</span>
+    <span class="text-light small" id="wiki-status"></span>
+</nav>
+
+<!-- Sidebar: File Browser -->
+<div class="sidebar">
+    <h6 class="mb-2"><i class="bi bi-folder2-open"></i> Wiki Files</h6>
+    <div id="file-tree" class="file-tree small">
+        <div class="text-muted">Loading...</div>
+    </div>
+</div>
+
+<!-- Main Content -->
+<div class="main-content">
+    <ul class="nav nav-tabs mb-3" id="mainTabs" role="tablist">
+        <li class="nav-item">
+            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-ingest" type="button">
+                <i class="bi bi-cloud-arrow-up"></i> Ingest
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-query" type="button">
+                <i class="bi bi-search"></i> Query
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-fileview" type="button">
+                <i class="bi bi-file-earmark-text"></i> File View
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-pages" type="button">
+                <i class="bi bi-collection"></i> Pages
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-log" type="button" id="log-tab-btn">
+                <i class="bi bi-clock-history"></i> Log
+            </button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-lint" type="button">
+                <i class="bi bi-shield-check"></i> Lint
+            </button>
+        </li>
+    </ul>
+
+    <div class="tab-content">
+        <!-- Ingest Tab -->
+        <div class="tab-pane fade show active" id="tab-ingest">
+            <h5><i class="bi bi-cloud-arrow-up"></i> Ingest Source</h5>
+            <p class="text-muted">Enter a URL — the app fetches it, analyzes with the LLM, and updates the wiki.</p>
+            <div class="input-group mb-3">
+                <input type="url" class="form-control" id="ingest-url" placeholder="https://example.com/article" value="">
+                <button class="btn btn-primary" type="button" id="ingest-btn">
+                    <i class="bi bi-play-fill"></i> Ingest
+                </button>
+            </div>
+            <div id="ingest-result"></div>
+        </div>
+
+        <!-- Query Tab -->
+        <div class="tab-pane fade" id="tab-query">
+            <h5><i class="bi bi-search"></i> Query the Wiki</h5>
+            <p class="text-muted">Ask a question — the LLM finds relevant pages and synthesizes an answer.</p>
+            <div class="mb-3">
+                <input type="text" class="form-control" id="query-input" placeholder="Your question...">
+            </div>
+            <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" id="query-save">
+                <label class="form-check-label" for="query-save">Save answer as wiki page</label>
+            </div>
+            <button class="btn btn-primary" id="query-btn"><i class="bi bi-play-fill"></i> Ask</button>
+            <div id="query-result"></div>
+        </div>
+
+        <!-- File View Tab -->
+        <div class="tab-pane fade" id="tab-fileview">
+            <h5 id="file-view-title"><i class="bi bi-file-earmark-text"></i> File View</h5>
+            <p class="text-muted small">Click a file in the sidebar to view it here.</p>
+            <div id="file-content" class="d-none"></div>
+        </div>
+
+        <!-- Pages Tab -->
+        <div class="tab-pane fade" id="tab-pages">
+            <h5><i class="bi bi-collection"></i> All Wiki Pages</h5>
+            <div id="pages-list" class="mt-3">
+                <div class="text-muted">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Log Tab -->
+        <div class="tab-pane fade" id="tab-log">
+            <h5><i class="bi bi-clock-history"></i> Wiki Log</h5>
+            <div id="log-content" class="result-box mt-3">
+                <div class="text-muted">Loading...</div>
+            </div>
+        </div>
+
+        <!-- Lint Tab -->
+        <div class="tab-pane fade" id="tab-lint">
+            <h5><i class="bi bi-shield-check"></i> Wiki Health Check</h5>
+            <p class="text-muted">Checks for orphaned pages, missing entries, and improvement suggestions.</p>
+            <button class="btn btn-outline-primary mb-3" id="lint-btn"><i class="bi bi-play-fill"></i> Run Lint</button>
+            <div id="lint-result"></div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const API = '';
+
+// ─── File Tree ────────────────────────────────────────────────────────
+async function loadFileTree() {
+    const container = document.getElementById('file-tree');
+    try {
+        const res = await fetch(`${API}/wiki/files/tree`);
+        if (!res.ok) throw new Error('Failed');
+        const tree = await res.json();
+        container.innerHTML = renderTree(tree);
+    } catch (e) {
+        container.innerHTML = '<div class="text-danger">Error loading</div>';
+    }
+}
+
+function renderTree(nodes) {
+    if (!nodes || nodes.length === 0) return '<div class="text-muted fst-italic">Empty</div>';
+    let html = '';
+    for (const node of nodes) {
+        if (node.type === 'directory') {
+            html += `<div class="folder">
+                <div class="folder-name" onclick="toggleFolder(this)">${node.name}</div>
+                <div class="children">${renderTree(node.children)}</div>
+            </div>`;
+        } else {
+            html += `<div class="file" onclick="loadFile('${node.path}', this)" title="${node.path}">${node.name}</div>`;
+        }
+    }
+    return html;
+}
+
+function toggleFolder(el) {
+    el.parentElement.classList.toggle('collapsed');
+}
+
+async function loadFile(path, el) {
+    // Highlight active
+    document.querySelectorAll('.file-tree .file').forEach(f => f.classList.remove('active'));
+    if (el) el.classList.add('active');
+
+    const contentDiv = document.getElementById('file-content');
+    const titleEl = document.getElementById('file-view-title');
+    titleEl.innerHTML = `<i class="bi bi-file-earmark-text"></i> ${path}`;
+
+    contentDiv.classList.remove('d-none');
+    contentDiv.textContent = 'Loading...';
+
+    try {
+        const res = await fetch(`${API}/wiki/files/content/${encodeURIComponent(path)}`);
+        if (!res.ok) throw new Error('Not found');
+        const data = await res.json();
+        contentDiv.textContent = data.content;
+    } catch (e) {
+        contentDiv.textContent = 'Error: Could not load file.';
+    }
+
+    // Switch to file view tab
+    const tab = new bootstrap.Tab(document.querySelector('[data-bs-target="#tab-fileview"]'));
+    tab.show();
+}
+
+// ─── Ingest ───────────────────────────────────────────────────────────
+document.getElementById('ingest-btn').addEventListener('click', async () => {
+    const url = document.getElementById('ingest-url').value.trim();
+    if (!url) return alert('Please enter a URL');
+
+    const btn = document.getElementById('ingest-btn');
+    btn.disabled = true;
+    btn.classList.add('loading');
+    document.getElementById('ingest-result').innerHTML = '<div class="text-muted">Ingest running...</div>';
+
+    try {
+        const res = await fetch(`${API}/sources`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            document.getElementById('ingest-result').innerHTML = `
+                <div class="result-box">
+                    <strong>✅ ${data.title}</strong><br>
+                    Pages touched: ${data.pagesTouched}<br>
+                    <hr>
+                    ${data.summary || ''}
+                </div>`;
+            loadFileTree();
+            loadPages();
+        } else {
+            document.getElementById('ingest-result').innerHTML = `<div class="result-box text-danger">❌ ${data.error}</div>`;
+        }
+    } catch (e) {
+        document.getElementById('ingest-result').innerHTML = `<div class="result-box text-danger">❌ ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+    }
+});
+
+// ─── Query ────────────────────────────────────────────────────────────
+document.getElementById('query-btn').addEventListener('click', async () => {
+    const question = document.getElementById('query-input').value.trim();
+    if (!question) return alert('Please enter a question');
+
+    const btn = document.getElementById('query-btn');
+    btn.disabled = true;
+    btn.classList.add('loading');
+    document.getElementById('query-result').innerHTML = '<div class="text-muted">Query running...</div>';
+
+    try {
+        const res = await fetch(`${API}/query`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                question,
+                saveAsPage: document.getElementById('query-save').checked
+            })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            let citedHtml = '';
+            if (data.citedPages && data.citedPages.length > 0) {
+                citedHtml = '<hr><small class="text-muted">Sources: ' + data.citedPages.join(', ') + '</small>';
+            }
+            document.getElementById('query-result').innerHTML = `
+                <div class="result-box">${data.answer.replace(/\n/g, '<br>')}${citedHtml}</div>`;
+        } else {
+            document.getElementById('query-result').innerHTML = `<div class="result-box text-danger">❌ ${data.error}</div>`;
+        }
+    } catch (e) {
+        document.getElementById('query-result').innerHTML = `<div class="result-box text-danger">❌ ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+    }
+});
+
+// Enter key for query
+document.getElementById('query-input').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') document.getElementById('query-btn').click();
+});
+
+// ─── Pages ────────────────────────────────────────────────────────────
+async function loadPages() {
+    const container = document.getElementById('pages-list');
+    try {
+        const res = await fetch(`${API}/wiki`);
+        if (!res.ok) throw new Error('Failed');
+        const pages = await res.json();
+        if (pages.length === 0) {
+            container.innerHTML = '<div class="text-muted">No pages yet. Ingest a source to get started!</div>';
+            return;
+        }
+        let html = '<div class="table-responsive"><table class="table table-sm table-hover">';
+        html += '<thead><tr><th>Title</th><th>Category</th><th>Slug</th><th>Updated</th></tr></thead><tbody>';
+        for (const p of pages) {
+            const badgeClass = {
+                'entity': 'bg-primary',
+                'concept': 'bg-success',
+                'source-summary': 'bg-info',
+                'analysis': 'bg-warning text-dark'
+            }[p.category] || 'bg-secondary';
+            html += `<tr>
+                <td><strong>${p.title}</strong></td>
+                <td><span class="badge ${badgeClass} badge-category">${p.category}</span></td>
+                <td><code>${p.slug}</code></td>
+                <td>${p.updated || p.created || '-'}</td>
+            </tr>`;
+        }
+        html += '</tbody></table></div>';
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = '<div class="text-danger">Error loading</div>';
+    }
+}
+
+// ─── Log ──────────────────────────────────────────────────────────────
+async function loadLog() {
+    const container = document.getElementById('log-content');
+    try {
+        const res = await fetch(`${API}/wiki/log`);
+        if (!res.ok) throw new Error('Failed');
+        const data = await res.json();
+        container.textContent = data.content || '(Empty)';
+    } catch (e) {
+        container.innerHTML = '<div class="text-danger">Error loading</div>';
+    }
+}
+
+// ─── Lint ─────────────────────────────────────────────────────────────
+document.getElementById('lint-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('lint-btn');
+    btn.disabled = true;
+    btn.classList.add('loading');
+    document.getElementById('lint-result').innerHTML = '<div class="text-muted">Lint running...</div>';
+
+    try {
+        const res = await fetch(`${API}/query/lint`);
+        const data = await res.json();
+        if (res.ok) {
+            let html = `<div class="result-box">
+                <strong>📊 Wiki Statistics</strong><br>
+                Pages: ${data.totalPages} | Sources: ${data.totalSources}<br><br>`;
+
+            if (data.orphanPages && data.orphanPages.length > 0) {
+                html += `<strong>⚠️ Orphaned Pages (${data.orphanPages.length}):</strong><br>`;
+                html += data.orphanPages.map(s => `<code>${s}</code>`).join(', ') + '<br><br>';
+            }
+            if (data.missingPages && data.missingPages.length > 0) {
+                html += `<strong>🔗 Missing Pages (${data.missingPages.length}):</strong><br>`;
+                html += data.missingPages.map(s => `<code>${s}</code>`).join(', ') + '<br><br>';
+            }
+            if (data.suggestions && data.suggestions.length > 0) {
+                html += `<strong>💡 Suggestions:</strong><br>`;
+                html += data.suggestions.map(s => `• ${s}`).join('<br>');
+            }
+            html += '</div>';
+            document.getElementById('lint-result').innerHTML = html;
+        } else {
+            document.getElementById('lint-result').innerHTML = `<div class="result-box text-danger">❌ ${data.error}</div>`;
+        }
+    } catch (e) {
+        document.getElementById('lint-result').innerHTML = `<div class="result-box text-danger">❌ ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+    }
+});
+
+// ─── Init ─────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    loadFileTree();
+    loadPages();
+    loadLog();
+    document.getElementById('wiki-status').textContent = 'Port 8480';
+});
+</script>
+</body>
+</html>
