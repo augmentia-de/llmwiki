@@ -25,6 +25,10 @@ import java.util.stream.Collectors;
  * 4. LLM synthesizes answer with citations
  * 5. Answer saved as analysis page
  * 6. log.md appended
+ *
+ * LLM calls use RetryableChatService:
+ *   - Up to 3 retries on primary model (30s delay between retries)
+ *   - Falls back to secondary model if all retries fail
  */
 @ApplicationScoped
 @Slf4j
@@ -35,6 +39,9 @@ public class QueryService {
 
     @Inject
     WikiFileService wikiFileService;
+
+    @Inject
+    RetryableChatService retryableChat;
 
     public QueryResponse query(String question, boolean saveAsPage) throws IOException {
         log.info("Query: {}", question);
@@ -73,24 +80,20 @@ public class QueryService {
             .collect(Collectors.joining("\n\n---\n\n"));
 
         // 5. Generate LLM answer
-        ChatRequest request = ChatRequest.builder()
-            .messages(
-                SystemMessage.from("""
-                    You are a wiki assistant. Answer questions based on the
-                    provided wiki context.
+        ChatResponse response = retryableChat.chat(
+            SystemMessage.from("""
+                You are a wiki assistant. Answer questions based on the
+                provided wiki context.
 
-                    Rules:
-                    1. Be structured
-                    2. Cite sources at the end of each statement like [Source: [[slug]]]
-                    3. Explicitly mention contradictions or uncertainties
-                    4. If the answer cannot be derived from the context,
-                       say so explicitly and suggest missing knowledge
-                    """),
-                UserMessage.from("Context:\n\n" + context + "\n\nQuestion: " + question)
-            )
-            .build();
-
-        ChatResponse response = chatModel.chat(request);
+                Rules:
+                1. Be structured
+                2. Cite sources at the end of each statement like [Source: [[slug]]]
+                3. Explicitly mention contradictions or uncertainties
+                4. If the answer cannot be derived from the context,
+                   say so explicitly and suggest missing knowledge
+                """),
+            UserMessage.from("Context:\n\n" + context + "\n\nQuestion: " + question)
+        );
         String answer = response.aiMessage().text();
 
         // 6. Optionally save as analysis page
@@ -123,8 +126,8 @@ public class QueryService {
      * LLM reads the index and finds the most relevant pages for the question.
      */
     private List<String> findRelevantPages(String indexContent, String question) {
-        ChatRequest request = ChatRequest.builder()
-            .messages(
+        try {
+            ChatResponse response = retryableChat.chat(
                 SystemMessage.from("""
                     You are a wiki index reader. Given the index of a wiki,
                     find ALL entries that could be relevant for the given question.
@@ -135,11 +138,7 @@ public class QueryService {
                     Example answer: wiki-pattern, rag, karpathy
                     """),
                 UserMessage.from("Wiki-Index:\n\n" + indexContent + "\n\nQuestion: " + question)
-            )
-            .build();
-
-        try {
-            ChatResponse response = chatModel.chat(request);
+            );
             String slugsStr = response.aiMessage().text().trim();
             return Arrays.stream(slugsStr.split(","))
                 .map(String::trim)

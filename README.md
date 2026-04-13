@@ -1,11 +1,78 @@
 # LLM Wiki — Karpathy Pattern
 
+> **⚠️ TEST PROJECT — Work in Progress**
+>
+> This is an **experimental test project** exploring Andrej Karpathy's LLM wiki idea.
+> It is **incomplete**, not production-ready, and serves as a technological feasibility study.
+> Some features are only partially implemented or missing entirely (see [Status](#status--missing-features)).
+
+---
+
 A **persistent, knowledge-accumulating wiki server** based on [Andrej Karpathy's LLM Wiki idea](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
 
 Instead of starting from scratch on every query (like RAG), this app **reads, synthesizes, and cross-links** sources incrementally — building a persistent wiki that grows smarter over time.
 
 > *"Ask a subtle question that requires synthesizing five documents, and the LLM has to find and piece together the relevant fragments every time. Nothing is built up."*
 > — Andrej Karpathy
+
+---
+
+## Status & Missing Features
+
+**This project is a proof of concept.** The following areas are known to be incomplete:
+
+| Area | Status |
+|---|---|
+| **Contradiction Detection** | Only during ingest, not during lint (as Karpathy originally envisioned) |
+| **Human Review Queue** | Not implemented — changes are applied directly |
+| **Schema / Agent Doc** | No `CLAUDE.md` / `AGENTS.md` for LLM self-description |
+| **Tests** | No meaningful unit or integration tests yet |
+| **Auth / Multi-User** | No authentication, no user management |
+| **Production Hardening** | No rate limiting, no caching, no monitoring |
+| **UI** | Basic Bootstrap SPA — not a full wiki experience yet |
+
+---
+
+## Architecture Advantages
+
+### 1. **No Vector Database — Index-Based Search**
+
+Instead of relying on expensive vector embeddings and specialized databases (Pinecone, Weaviate, Milvus, etc.), this project uses **plain-text index search**:
+
+| Vector-Based (RAG) | This Project (Index-Based) |
+|---|---|
+| Embedding model locks you in — once chosen, hard to switch | **Model-agnostic** — any LLM can answer any question |
+| Embeddings are **computed once** — new model = recalculate all vectors | Text stays **always readable and searchable**, regardless of which model you use |
+| Vector DBs cause **ongoing costs** and vendor lock-in | **No extra infrastructure** — just the file system |
+| Semantic search is a "black box" — you don't know why something was found | **Transparent** — `index.md` shows exactly which pages exist and how they're linked |
+
+### 2. **Cost Advantages Through Cheap LLMs**
+
+- **Any OpenAI-compatible LLM works** — from free Ollama (local) to GPT-4o
+- **Fallback mechanism** built in: when the primary model fails, an alternative model automatically takes over (configurable in `application.properties`)
+- **No embedding costs**: With vector-based systems you pay twice — once for embeddings, once for the chat response. Here the embedding part is eliminated entirely
+- **Local models possible**: With Ollama the system runs **completely free** and offline
+
+### 3. **Interoperability & Model Freedom**
+
+- **Switch models in seconds**: Just change `LLM_CHAT_MODEL` and `LLM_CHAT_BASE_URL` — done
+- **No lock-in**: Your data is Markdown files, not binary vectors. They survive any model switch
+- **Multi-provider support**: OpenAI, OpenRouter, Ollama, Azure OpenAI, local models — all possible
+- **Future-proof**: When a better, cheaper model appears tomorrow, you change one environment variable
+
+### 4. **Persistent, Growing Knowledge Base**
+
+- **No "reset" per query** like classic RAG — the wiki **learns and grows** with every source
+- One source updates **10–30 existing pages**, not just generating a new answer
+- **Cross-links** (`[[slug]]`) connect concepts automatically — a growing knowledge-graph-like network
+- **Logbook** (`log.md`) chronicles every change
+
+### 5. **Simplicity & Portability**
+
+- **No database** — everything is Markdown files
+- **Git-compatible** — the wiki can be versioned, pushed, pulled
+- **Single Binary** — Quarkus Native enables a single executable binary
+- **MCP Server** integrated — the wiki can be used as a tool by other LLM clients
 
 ---
 

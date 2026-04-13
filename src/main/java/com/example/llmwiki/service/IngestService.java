@@ -29,6 +29,10 @@ import java.util.*;
  * 8. log.md is appended
  *
  * A single source can touch 10–15 wiki pages.
+ *
+ * LLM calls use RetryableChatService:
+ *   - Up to 3 retries on primary model (30s delay between retries)
+ *   - Falls back to secondary model if all retries fail
  */
 @ApplicationScoped
 @Slf4j
@@ -39,6 +43,9 @@ public class IngestService {
 
     @Inject
     WikiFileService wikiFileService;
+
+    @Inject
+    RetryableChatService retryableChat;
 
     /**
      * Main ingest method.
@@ -81,8 +88,8 @@ public class IngestService {
     private LlmAnalysis analyzeSource(String title, String text) {
         String textForAnalysis = text.length() > 12000 ? text.substring(0, 12000) : text;
 
-        ChatRequest request = ChatRequest.builder()
-            .messages(
+        try {
+            ChatResponse response = retryableChat.chat(
                 SystemMessage.from("""
                     You are a wiki author. Analyze the following source and extract:
 
@@ -104,11 +111,7 @@ public class IngestService {
                     }
                     """),
                 UserMessage.from("Title: " + title + "\n\nContent:\n" + textForAnalysis)
-            )
-            .build();
-
-        try {
-            ChatResponse response = chatModel.chat(request);
+            );
             String json = response.aiMessage().text();
             return parseAnalysisJson(json);
         } catch (Exception e) {
