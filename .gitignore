@@ -19,6 +19,9 @@ Thumbs.db
 ### Env
 .env
 
+### Wiki Data (local dev)
+wiki-data/
+
 ### Quarkus
 quarkus.log
 /old/

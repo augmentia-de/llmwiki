@@ -33,8 +33,8 @@ public class WikiFileService {
 
     @PostConstruct
     void init() {
-        wikiDir = Path.of(config.wikiDir());
-        rawDir = Path.of(config.rawDir());
+        wikiDir = resolvePath(config.wikiDir());
+        rawDir = resolvePath(config.rawDir());
 
         try {
             // Create directory structure
@@ -42,6 +42,8 @@ public class WikiFileService {
             Files.createDirectories(rawDir);
             Files.createDirectories(wikiDir.resolve("entities"));
             Files.createDirectories(wikiDir.resolve("concepts"));
+            Files.createDirectories(wikiDir.resolve("projects"));
+            Files.createDirectories(wikiDir.resolve("technologies"));
             Files.createDirectories(wikiDir.resolve("sources"));
             Files.createDirectories(wikiDir.resolve("analyses"));
             Files.createDirectories(rawDir.resolve("assets"));
@@ -50,10 +52,22 @@ public class WikiFileService {
             initIndexFile();
             initLogFile();
 
-            log.info("Wiki directories initialized: {}", wikiDir);
+            log.info("Wiki directories initialized: wiki={} raw={}", wikiDir.toAbsolutePath(), rawDir.toAbsolutePath());
         } catch (IOException e) {
             throw new RuntimeException("Failed to initialize wiki directories", e);
         }
+    }
+
+    /**
+     * Resolves a path string to an absolute Path.
+     * Relative paths are resolved against the current working directory.
+     */
+    private Path resolvePath(String pathStr) {
+        Path path = Path.of(pathStr);
+        if (!path.isAbsolute()) {
+            path = Path.of(System.getProperty("user.dir")).resolve(path).normalize();
+        }
+        return path;
     }
 
     private void initIndexFile() throws IOException {
@@ -88,7 +102,7 @@ public class WikiFileService {
      */
     public WikiPage readPage(String slug) throws IOException {
         // Find the file across all categories
-        for (String dir : List.of("entities", "concepts", "sources", "analyses")) {
+        for (String dir : List.of("entities", "concepts", "projects", "technologies", "sources", "analyses")) {
             Path file = wikiDir.resolve(dir).resolve(slug + ".md");
             if (Files.exists(file)) {
                 String content = Files.readString(file);
@@ -116,6 +130,8 @@ public class WikiFileService {
         String dirName = switch (category) {
             case "entity" -> "entities";
             case "concept" -> "concepts";
+            case "project" -> "projects";
+            case "technology" -> "technologies";
             case "source-summary" -> "sources";
             case "analysis" -> "analyses";
             default -> category;
@@ -147,7 +163,7 @@ public class WikiFileService {
      */
     public List<WikiPage> readAllPages() {
         List<WikiPage> all = new ArrayList<>();
-        for (String cat : List.of("entity", "concept", "source-summary", "analysis")) {
+        for (String cat : List.of("entity", "concept", "project", "technology", "source-summary", "analysis")) {
             all.addAll(readCategory(cat));
         }
         return all;
@@ -253,7 +269,7 @@ public class WikiFileService {
      * @return true if deleted, false if not found
      */
     public boolean deletePage(String slug) throws IOException {
-        for (String dir : List.of("entities", "concepts", "sources", "analyses")) {
+        for (String dir : List.of("entities", "concepts", "projects", "technologies", "sources", "analyses")) {
             Path file = wikiDir.resolve(dir).resolve(slug + ".md");
             if (Files.exists(file)) {
                 Files.delete(file);

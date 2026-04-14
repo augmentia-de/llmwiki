@@ -21,6 +21,8 @@ public record WikiPage(
             case "concept" -> "concepts";
             case "source-summary" -> "sources";
             case "analysis" -> "analyses";
+            case "project" -> "projects";
+            case "technology" -> "technologies";
             default -> "other";
         };
     }

@@ -99,6 +99,11 @@
             </button>
         </li>
         <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-projects" type="button">
+                <i class="bi bi-code-square"></i> Projects
+            </button>
+        </li>
+        <li class="nav-item">
             <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-query" type="button">
                 <i class="bi bi-search"></i> Query
             </button>
@@ -137,6 +142,23 @@
                 </button>
             </div>
             <div id="ingest-result"></div>
+        </div>
+
+        <!-- Projects Tab -->
+        <div class="tab-pane fade" id="tab-projects">
+            <h5><i class="bi bi-code-square"></i> Analyze Software Project</h5>
+            <p class="text-muted">Provide a GitHub repository URL or local directory — the app scans the code, detects technologies, and creates wiki pages.</p>
+            
+            <div class="mb-3">
+                <label class="form-label">GitHub Repository URL</label>
+                <input type="url" class="form-control" id="project-github-url" placeholder="https://github.com/user/repo">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Or Local Directory Path</label>
+                <input type="text" class="form-control" id="project-local-path" placeholder="/path/to/project">
+            </div>
+            <button class="btn btn-success" id="project-btn"><i class="bi bi-play-fill"></i> Analyze Project</button>
+            <div id="project-result" class="mt-3"></div>
         </div>
 
         <!-- Query Tab -->
@@ -288,6 +310,60 @@ document.getElementById('ingest-btn').addEventListener('click', async () => {
     }
 });
 
+// ─── Projects ─────────────────────────────────────────────────────────
+document.getElementById('project-btn').addEventListener('click', async () => {
+    const githubUrl = document.getElementById('project-github-url').value.trim();
+    const localPath = document.getElementById('project-local-path').value.trim();
+    if (!githubUrl && !localPath) return alert('Please enter a GitHub URL or local path');
+
+    const btn = document.getElementById('project-btn');
+    btn.disabled = true;
+    btn.classList.add('loading');
+    document.getElementById('project-result').innerHTML = '<div class="text-muted">Analysis running...</div>';
+
+    try {
+        const body = {};
+        if (githubUrl) body.githubUrl = githubUrl;
+        if (localPath) body.localPath = localPath;
+
+        const res = await fetch(`${API}/projects/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (res.ok) {
+            let techsHtml = '';
+            if (data.technologies && data.technologies.length > 0) {
+                techsHtml = '<hr><strong>Technologies:</strong><br>' + 
+                    data.technologies.map(t => `<span class="badge bg-primary me-1 mb-1">${t}</span>`).join('');
+            }
+            let keywordsHtml = '';
+            if (data.keywords && data.keywords.length > 0) {
+                keywordsHtml = '<br><strong>Keywords:</strong><br>' + 
+                    data.keywords.map(k => `<span class="badge bg-success me-1 mb-1">${k}</span>`).join('');
+            }
+            document.getElementById('project-result').innerHTML = `
+                <div class="result-box">
+                    <strong>✅ ${data.projectName}</strong><br>
+                    ${data.description || ''}
+                    <br>Pages created: ${data.pagesCreated}
+                    ${techsHtml}
+                    ${keywordsHtml}
+                </div>`;
+            loadFileTree();
+            loadPages();
+        } else {
+            document.getElementById('project-result').innerHTML = `<div class="result-box text-danger">❌ ${data.error}</div>`;
+        }
+    } catch (e) {
+        document.getElementById('project-result').innerHTML = `<div class="result-box text-danger">❌ ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+    }
+});
+
 // ─── Query ────────────────────────────────────────────────────────────
 document.getElementById('query-btn').addEventListener('click', async () => {
     const question = document.getElementById('query-input').value.trim();
@@ -348,8 +424,10 @@ async function loadPages() {
             const badgeClass = {
                 'entity': 'bg-primary',
                 'concept': 'bg-success',
-                'source-summary': 'bg-info',
-                'analysis': 'bg-warning text-dark'
+                'project': 'bg-info',
+                'technology': 'bg-warning text-dark',
+                'source-summary': 'bg-secondary',
+                'analysis': 'bg-dark'
             }[p.category] || 'bg-secondary';
             html += `<tr>
                 <td><strong>${p.title}</strong></td>

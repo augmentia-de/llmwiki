@@ -20,4 +20,8 @@ public interface WikiConfig {
     /** Directory for the wiki itself */
     @WithDefault("${HOME}/karpathy-wiki/wiki")
     String wikiDir();
+
+    /** Directory for analyzed project metadata (optional, defaults to wiki/projects) */
+    @WithDefault("${HOME}/karpathy-wiki/projects")
+    String projectsDir();
 }
