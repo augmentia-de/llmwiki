@@ -22,6 +22,10 @@ Thumbs.db
 ### Wiki Data (local dev)
 wiki-data/
 
+### Package (deployable artifacts)
+package/*.jar
+package/.env
+
 ### Quarkus
 quarkus.log
 /old/

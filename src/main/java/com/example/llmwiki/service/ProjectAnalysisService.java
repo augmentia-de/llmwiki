@@ -9,9 +9,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.*;
 import java.time.LocalDate;
 import java.util.*;
@@ -21,12 +23,14 @@ import java.util.stream.Stream;
 /**
  * Analyzes software projects from local directories or GitHub repositories.
  *
- * Workflow:
- * 1. GitHub URL → clone to temp directory (via git CLI)
- * 2. Scan file tree for relevant files
- * 3. Extract technologies from build files (pom.xml, package.json, etc.)
- * 4. LLM analyzes key files and produces structured analysis
- * 5. Wiki pages created: project page, technology pages, keyword pages
+ * Remote (GitHub): Fetches files via GitHub API/raw URLs — no clone needed.
+ * Local: Reads files directly from the filesystem.
+ *
+ * Iterative workflow:
+ * 1. Find files in priority order (README first)
+ * 2. Read ONE file at a time, ask LLM if enough info
+ * 3. If LLM says "need more" → read next file, accumulate context
+ * 4. Create wiki pages from the analysis
  */
 @ApplicationScoped
 @Slf4j
@@ -43,17 +47,12 @@ public class ProjectAnalysisService {
 
     private Path projectsDir;
 
-    // File patterns to analyze
-    private static final Set<String> RELEVANT_EXTENSIONS = Set.of(
-        ".java", ".py", ".ts", ".tsx", ".js", ".jsx", ".kt", ".go", ".rs", ".rb",
-        ".md", ".rst", ".txt", ".yaml", ".yml", ".json", ".xml", ".toml",
-        ".cfg", ".ini", ".properties", ".sql", ".graphql"
-    );
+    private static final HttpClient HTTP = HttpClient.newHttpClient();
 
-    // Files to always include
-    private static final Set<String> ALWAYS_INCLUDE = Set.of(
+    // Files to check — in priority order (README first, then build files, etc.)
+    private static final List<String> FILE_PRIORITY_ORDER = List.of(
         "README.md", "README.rst", "README.txt",
-        "package.json", "pom.xml", "build.gradle", "build.gradle.kts",
+        "pom.xml", "package.json", "build.gradle", "build.gradle.kts",
         "requirements.txt", "pyproject.toml", "Cargo.toml", "go.mod",
         "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
         "Makefile", "CMakeLists.txt",
@@ -61,10 +60,7 @@ public class ProjectAnalysisService {
         "LICENSE", "LICENSE.md", "LICENSE.txt"
     );
 
-    // GitHub workflow files
-    private static final Set<String> WORKFLOW_PATTERNS = Set.of(
-        ".github/workflows/"
-    );
+    private static final int MAX_FILES_TO_READ = 5;
 
     void init() {
         projectsDir = resolvePath(config.projectsDir());
@@ -76,10 +72,6 @@ public class ProjectAnalysisService {
         }
     }
 
-    /**
-     * Resolves a path string to an absolute Path.
-     * Relative paths are resolved against the current working directory.
-     */
     private Path resolvePath(String pathStr) {
         Path path = Path.of(pathStr);
         if (!path.isAbsolute()) {
@@ -94,129 +86,276 @@ public class ProjectAnalysisService {
     public AnalysisResult analyzeProject(String githubUrl, String localPath) throws IOException {
         log.info("Starting project analysis: url={}, localPath={}", githubUrl, localPath);
 
-        Path projectDir;
+        ProjectAnalysis analysis;
         String projectIdentifier;
 
         if (githubUrl != null && !githubUrl.isBlank()) {
-            // Clone GitHub repo
-            projectDir = cloneGitHubRepo(githubUrl);
+            // Remote analysis via GitHub API — no clone
+            analysis = analyzeIterativelyRemote(githubUrl);
             projectIdentifier = githubUrl;
         } else if (localPath != null && !localPath.isBlank()) {
-            projectDir = Path.of(localPath);
+            // Local analysis
+            Path projectDir = Path.of(localPath);
             if (!Files.isDirectory(projectDir)) {
                 throw new IOException("Local path is not a directory: " + localPath);
             }
+
+            List<Path> priorityFiles = scanProjectFilesInPriorityOrder(projectDir);
+            log.info("Found {} files in priority order, will read max {}", priorityFiles.size(), MAX_FILES_TO_READ);
+
+            analysis = analyzeIterativelyLocal(localPath, priorityFiles, projectDir);
             projectIdentifier = localPath;
         } else {
             throw new IOException("Either githubUrl or localPath must be provided");
         }
 
-        try {
-            // Scan project files
-            List<Path> relevantFiles = scanProjectFiles(projectDir);
-            log.info("Found {} relevant files", relevantFiles.size());
+        // Create wiki pages
+        int pagesCreated = createWikiPages(analysis, projectIdentifier);
 
-            // Extract technologies from build files
-            List<String> detectedTechnologies = detectTechnologies(projectDir, relevantFiles);
+        // Update index
+        updateProjectIndex();
 
-            // Read key file contents for LLM analysis
-            String fileContentsForLLM = prepareFileContents(relevantFiles, projectDir);
+        log.info("Project analysis complete: {} created {} pages",
+            analysis.projectName(), pagesCreated);
 
-            // LLM analysis
-            ProjectAnalysis analysis = analyzeWithLLM(
-                projectIdentifier, fileContentsForLLM, detectedTechnologies
-            );
+        return new AnalysisResult(analysis, pagesCreated);
+    }
 
-            // Create wiki pages
-            int pagesCreated = createWikiPages(analysis, projectIdentifier);
+    // ─── GitHub Remote Methods ───────────────────────────────────────────
 
-            // Update index
-            updateProjectIndex();
-
-            log.info("Project analysis complete: {} created {} pages",
-                analysis.projectName(), pagesCreated);
-
-            return new AnalysisResult(analysis, pagesCreated);
-
-        } finally {
-            // Clean up temp directory if cloned from GitHub
-            if (githubUrl != null && !githubUrl.isBlank()) {
-                deleteDirectory(projectDir);
-            }
+    /**
+     * Parses a GitHub URL and extracts owner, repo.
+     * E.g. "https://github.com/user/repo" → ["user", "repo"]
+     */
+    private String[] parseGitHubUrl(String githubUrl) {
+        String cleaned = githubUrl.replaceAll("\\.git$", "").trim();
+        String[] parts = cleaned.split("/");
+        if (parts.length >= 2) {
+            return new String[]{parts[parts.length - 2], parts[parts.length - 1]};
         }
+        return null;
     }
 
     /**
-     * Clones a GitHub repository to a temp directory.
+     * Fetches the default branch name from GitHub API.
      */
-    private Path cloneGitHubRepo(String githubUrl) throws IOException {
-        Path tempDir = Files.createTempDirectory("scrwiki-clone-");
-        String repoName = extractRepoName(githubUrl);
-
-        ProcessBuilder pb = new ProcessBuilder(
-            "git", "clone", "--depth", "1", githubUrl, tempDir.resolve(repoName).toString()
-        );
-        pb.redirectErrorStream(true);
-
+    private String fetchDefaultBranch(String owner, String repo) {
         try {
-            Process process = pb.start();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                log.debug("git clone: {}", line);
+            String url = "https://api.github.com/repos/" + owner + "/" + repo;
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "ScrWiki/1.0")
+                .GET()
+                .build();
+
+            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                log.warn("GitHub API returned {}: {}", resp.statusCode(), resp.body().substring(0, Math.min(200, resp.body().length())));
+                return "main";
             }
-            int exitCode = process.waitFor();
-            if (exitCode != 0) {
-                throw new IOException("git clone failed with exit code " + exitCode);
+
+            String json = resp.body();
+            int idx = json.indexOf("\"default_branch\"");
+            if (idx >= 0) {
+                int start = json.indexOf(":", idx) + 1;
+                while (start < json.length() && json.charAt(start) != '"') start++;
+                start++;
+                int end = json.indexOf("\"", start);
+                if (end > start) return json.substring(start, end);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("git clone interrupted", e);
+        } catch (Exception e) {
+            log.warn("Failed to fetch default branch, defaulting to 'main': {}", e.getMessage());
         }
-
-        return tempDir.resolve(repoName);
-    }
-
-    private String extractRepoName(String githubUrl) {
-        // https://github.com/user/repo → repo
-        String[] parts = githubUrl.replaceAll("\\.git$", "").split("/");
-        return parts.length > 0 ? parts[parts.length - 1] : "repo";
+        return "main";
     }
 
     /**
-     * Scans the project directory for relevant files.
+     * Lists files in the root of a GitHub repo that match FILE_PRIORITY_ORDER.
+     * Returns file names in priority order.
      */
-    private List<Path> scanProjectFiles(Path projectDir) throws IOException {
-        List<Path> relevantFiles = new ArrayList<>();
-        int maxFiles = 50; // Limit to avoid token overflow
-        int count = 0;
+    private List<String> fetchRootFileList(String owner, String repo, String branch) {
+        try {
+            String url = String.format("https://api.github.com/repos/%s/%s/contents/?ref=%s",
+                owner, repo, branch);
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "ScrWiki/1.0")
+                .GET()
+                .build();
 
-        try (Stream<Path> walk = Files.walk(projectDir)) {
-            List<Path> sorted = walk
-                .filter(Files::isRegularFile)
-                .filter(p -> !isInIgnoredDirectory(p, projectDir))
-                .sorted(Comparator.comparing(Path::getFileName))
-                .toList();
+            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                log.warn("GitHub API list files returned {}: {}", resp.statusCode(), resp.body().substring(0, Math.min(200, resp.body().length())));
+                return Collections.emptyList();
+            }
 
-            for (Path file : sorted) {
-                if (count >= maxFiles) break;
+            // Parse JSON response to find matching files
+            Set<String> availableFiles = new LinkedHashSet<>();
+            var matcher = java.util.regex.Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"")
+                .matcher(resp.body());
+            while (matcher.find()) {
+                availableFiles.add(matcher.group(1));
+            }
 
-                String relativePath = projectDir.relativize(file).toString();
-                String fileName = file.getFileName().toString();
-                String extension = getFileExtension(fileName);
-
-                boolean shouldInclude = ALWAYS_INCLUDE.contains(fileName);
-                    //|| RELEVANT_EXTENSIONS.contains(extension)
-                    //|| WORKFLOW_PATTERNS.stream().anyMatch(relativePath::contains);
-
-                if (shouldInclude) {
-                    relevantFiles.add(file);
-                    count++;
+            // Return in priority order
+            List<String> result = new ArrayList<>();
+            for (String priorityFile : FILE_PRIORITY_ORDER) {
+                if (availableFiles.contains(priorityFile)) {
+                    result.add(priorityFile);
                 }
             }
+
+            log.info("Found {} priority files in remote repo: {}", result.size(), result);
+            return result;
+
+        } catch (Exception e) {
+            log.warn("Failed to list remote files: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Fetches a single file's content from raw.githubusercontent.com.
+     */
+    private String fetchGitHubFileContent(String owner, String repo, String branch, String fileName) {
+        try {
+            String url = String.format("https://raw.githubusercontent.com/%s/%s/%s/%s",
+                owner, repo, branch, fileName);
+            HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", "ScrWiki/1.0")
+                .GET()
+                .build();
+
+            HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                log.debug("File not found ({}): {}", resp.statusCode(), fileName);
+                return null;
+            }
+
+            String content = resp.body();
+            if (content.isBlank()) return null;
+
+            // Truncate very large files
+            if (content.length() > 10000) {
+                content = content.substring(0, 10000) + "\n... (truncated)";
+            }
+
+            return content;
+
+        } catch (Exception e) {
+            log.debug("Failed to fetch remote file {}: {}", fileName, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Iterative analysis via GitHub API: fetches one file at a time remotely.
+     */
+    private ProjectAnalysis analyzeIterativelyRemote(String githubUrl) {
+        String[] parsed = parseGitHubUrl(githubUrl);
+        if (parsed == null) {
+            log.error("Invalid GitHub URL: {}", githubUrl);
+            return ProjectAnalysis.empty();
         }
 
-        return relevantFiles;
+        String owner = parsed[0];
+        String repo = parsed[1];
+        String branch = fetchDefaultBranch(owner, repo);
+
+        log.info("Remote analysis: {}/{}, branch={}", owner, repo, branch);
+
+        // Get list of available files
+        List<String> availableFiles = fetchRootFileList(owner, repo, branch);
+        if (availableFiles.isEmpty()) {
+            log.warn("No priority files found in remote repo");
+            return ProjectAnalysis.empty();
+        }
+
+        StringBuilder accumulatedContext = new StringBuilder();
+        int filesRead = 0;
+        ProjectAnalysis bestAnalysis = null;
+
+        for (String fileName : availableFiles) {
+            if (filesRead >= MAX_FILES_TO_READ) {
+                log.info("Max files limit ({}) reached, stopping", MAX_FILES_TO_READ);
+                break;
+            }
+
+            // Fetch ONE file remotely
+            String content = fetchGitHubFileContent(owner, repo, branch, fileName);
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+
+            filesRead++;
+            accumulatedContext.append("\n\n--- FILE ").append(filesRead).append(": ")
+                .append(fileName).append(" ---\n\n").append(content);
+
+            log.info("Fetched remote file {}/{}: {} ({} chars)", filesRead, MAX_FILES_TO_READ, fileName, content.length());
+
+            // Ask LLM to analyze accumulated context
+            LlmIterativeResponse llmResponse = analyzeIncremental(
+                githubUrl, accumulatedContext.toString(), filesRead
+            );
+
+            bestAnalysis = llmResponse.analysis;
+
+            if (llmResponse.sufficient) {
+                log.info("LLM determined analysis is sufficient after {} remote file(s): {}",
+                    filesRead, fileName);
+                break;
+            } else {
+                log.info("LLM needs more info (reason: {}), fetching next file...",
+                    llmResponse.reason);
+            }
+        }
+
+        if (bestAnalysis == null) {
+            log.warn("No analysis result from LLM, returning empty");
+            return ProjectAnalysis.empty();
+        }
+
+        return bestAnalysis;
+    }
+
+    // ─── Local File Methods ──────────────────────────────────────────────
+
+    /**
+     * Scans the project directory and returns files sorted by priority order.
+     * Root-level files are preferred over files in subdirectories.
+     */
+    private List<Path> scanProjectFilesInPriorityOrder(Path projectDir) throws IOException {
+        Map<String, Path> availableFiles = new LinkedHashMap<>();
+
+        try (Stream<Path> walk = Files.walk(projectDir)) {
+            walk.filter(Files::isRegularFile)
+                .filter(p -> !isInIgnoredDirectory(p, projectDir))
+                .sorted(Comparator.comparing(Path::getFileName)
+                    .thenComparing(p -> p.getParent() != null ? p.getParent().getNameCount() : 0))
+                .forEach(file -> {
+                    String fileName = file.getFileName().toString();
+                    if (FILE_PRIORITY_ORDER.contains(fileName)) {
+                        // Prefer root-level files over subdirectory files
+                        Path relative = projectDir.relativize(file);
+                        boolean isRootFile = relative.getNameCount() == 1;
+                        if (isRootFile || !availableFiles.containsKey(fileName)) {
+                            availableFiles.put(fileName, file);
+                        }
+                    }
+                });
+        }
+
+        List<Path> result = new ArrayList<>();
+        for (String priorityFile : FILE_PRIORITY_ORDER) {
+            if (availableFiles.containsKey(priorityFile)) {
+                result.add(availableFiles.get(priorityFile));
+            }
+        }
+
+        return result;
     }
 
     private boolean isInIgnoredDirectory(Path file, Path projectDir) {
@@ -233,151 +372,75 @@ public class ProjectAnalysisService {
             || relative.startsWith(".vscode/");
     }
 
-    private String getFileExtension(String fileName) {
-        int dotIndex = fileName.lastIndexOf('.');
-        return dotIndex >= 0 ? fileName.substring(dotIndex).toLowerCase() : "";
-    }
-
     /**
-     * Detects technologies from build files.
+     * Iterative analysis: reads one file at a time, asks LLM if sufficient.
      */
-    private List<String> detectTechnologies(Path projectDir, List<Path> relevantFiles) {
-        Set<String> technologies = new LinkedHashSet<>();
-
-        for (Path file : relevantFiles) {
-            String fileName = file.getFileName().toString();
-
-            try {
-                String content = Files.readString(file);
-
-                switch (fileName) {
-                    case "pom.xml" -> {
-                        technologies.add("Java");
-                        technologies.add("Maven");
-                        // Extract common dependencies
-                        extractXmlDependencies(content).forEach(technologies::add);
-                    }
-                    case "package.json" -> {
-                        technologies.add("JavaScript");
-                        technologies.add("Node.js");
-                        extractJsonDependencies(content).forEach(technologies::add);
-                    }
-                    case "requirements.txt" -> {
-                        technologies.add("Python");
-                        content.lines()
-                            .map(line -> line.split("==")[0].split(">=")[0].split("<")[0].trim())
-                            .filter(line -> !line.isEmpty() && !line.startsWith("#"))
-                            .forEach(technologies::add);
-                    }
-                    case "pyproject.toml" -> technologies.add("Python");
-                    case "build.gradle", "build.gradle.kts" -> {
-                        technologies.add("Java");
-                        technologies.add("Gradle");
-                    }
-                    case "Cargo.toml" -> technologies.add("Rust");
-                    case "go.mod" -> technologies.add("Go");
-                    case "Dockerfile" -> technologies.add("Docker");
-                    default -> {
-                        if (fileName.endsWith(".java")) technologies.add("Java");
-                        else if (fileName.endsWith(".py")) technologies.add("Python");
-                        else if (fileName.endsWith(".ts") || fileName.endsWith(".tsx")) technologies.add("TypeScript");
-                        else if (fileName.endsWith(".js") || fileName.endsWith(".jsx")) technologies.add("JavaScript");
-                        else if (fileName.endsWith(".kt")) technologies.add("Kotlin");
-                        else if (fileName.endsWith(".go")) technologies.add("Go");
-                        else if (fileName.endsWith(".rs")) technologies.add("Rust");
-                    }
-                }
-            } catch (IOException e) {
-                log.debug("Could not read file for tech detection: {}", file, e);
-            }
-        }
-
-        return new ArrayList<>(technologies);
-    }
-
-    private List<String> extractXmlDependencies(String pomXml) {
-        List<String> deps = new ArrayList<>();
-        // Simple extraction of artifactIds
-        var matcher = java.util.regex.Pattern.compile("<artifactId>([^<]+)</artifactId>")
-            .matcher(pomXml);
-        while (matcher.find()) {
-            String artifactId = matcher.group(1);
-            // Filter common non-library artifacts
-            if (!artifactId.startsWith("maven-") &&
-                !artifactId.equals("pom.xml") &&
-                !artifactId.contains("parent")) {
-                deps.add(artifactId);
-            }
-        }
-        return deps.stream().limit(15).toList();
-    }
-
-    private List<String> extractJsonDependencies(String packageJson) {
-        List<String> deps = new ArrayList<>();
-        try {
-            // Simple extraction without JSON library
-            var matcher = java.util.regex.Pattern.compile("\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\"")
-                .matcher(packageJson);
-            boolean inDepsSection = false;
-            while (matcher.find()) {
-                String key = matcher.group(1);
-                if (key.equals("dependencies") || key.equals("devDependencies")) {
-                    inDepsSection = true;
-                    continue;
-                }
-                if (inDepsSection && key.startsWith("}")) {
-                    inDepsSection = false;
-                }
-                if (inDepsSection && !key.equals("dependencies") && !key.equals("devDependencies")) {
-                    deps.add(key);
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Failed to parse package.json dependencies", e);
-        }
-        return deps.stream().limit(20).toList();
-    }
-
-    /**
-     * Prepares file contents for LLM analysis, grouping by type.
-     */
-    private String prepareFileContents(List<Path> files, Path projectDir) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        int maxContentSize = 15000; // Limit total size
-
-        // Priority files first
-        List<Path> priorityFiles = files.stream()
-            .filter(f -> ALWAYS_INCLUDE.contains(f.getFileName().toString()))
-            .toList();
-
-        List<Path> otherFiles = files.stream()
-            .filter(f -> !priorityFiles.contains(f))
-            .toList();
+    private ProjectAnalysis analyzeIterativelyLocal(
+        String projectIdentifier, List<Path> priorityFiles, Path projectDir
+    ) throws IOException {
+        StringBuilder accumulatedContext = new StringBuilder();
+        int filesRead = 0;
+        ProjectAnalysis bestAnalysis = null;
 
         for (Path file : priorityFiles) {
-            if (sb.length() >= maxContentSize) break;
-            appendFileContent(file, projectDir, sb);
+            if (filesRead >= MAX_FILES_TO_READ) {
+                log.info("Max files limit ({}) reached, stopping", MAX_FILES_TO_READ);
+                break;
+            }
+
+            // Read ONE file
+            String content = readSingleFile(file, projectDir);
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+
+            String fileName = projectDir.relativize(file).toString();
+            accumulatedContext.append("\n\n--- FILE ").append(filesRead + 1).append(": ")
+                .append(fileName).append(" ---\n\n").append(content);
+
+            filesRead++;
+            log.info("Read file {}/{}: {} ({} chars)", filesRead, MAX_FILES_TO_READ, fileName, content.length());
+
+            // Ask LLM to analyze accumulated context
+            LlmIterativeResponse llmResponse = analyzeIncremental(
+                projectIdentifier, accumulatedContext.toString(), filesRead
+            );
+
+            bestAnalysis = llmResponse.analysis;
+
+            if (llmResponse.sufficient) {
+                log.info("LLM determined analysis is sufficient after {} file(s): {}",
+                    filesRead, fileName);
+                break;
+            } else {
+                log.info("LLM needs more info (reason: {}), reading next file...",
+                    llmResponse.reason);
+            }
         }
-/*
-        for (Path file : otherFiles) {
-            if (sb.length() >= maxContentSize) break;
-            appendFileContent(file, projectDir, sb);
+
+        if (bestAnalysis == null) {
+            log.warn("No analysis result from LLM, returning empty");
+            return ProjectAnalysis.empty();
         }
-*/
-        return sb.toString();
+
+        return bestAnalysis;
     }
 
-    private void appendFileContent(Path file, Path projectDir, StringBuilder sb) throws IOException {
+    /**
+     * Reads a single file and returns its content.
+     */
+    private String readSingleFile(Path file, Path projectDir) throws IOException {
         String content = Files.readString(file);
-        // Skip binary-like files or very large files
-        if (content.length() > 5000) {
-            content = content.substring(0, 5000) + "\n... (truncated)";
+
+        if (content.isBlank()) return null;
+
+        if (content.length() > 10000) {
+            content = content.substring(0, 10000) + "\n... (truncated)";
         }
-        if (!content.isBlank() && isTextFile(file.getFileName().toString())) {
-            String relativePath = projectDir.relativize(file).toString();
-            sb.append("\n\n--- FILE: ").append(relativePath).append(" ---\n\n");
-            sb.append(content);
-        }
+
+        if (!isTextFile(file.getFileName().toString())) return null;
+
+        return content;
     }
 
     private boolean isTextFile(String fileName) {
@@ -385,55 +448,114 @@ public class ProjectAnalysisService {
         return !Set.of(".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".ttf", ".bin", ".jar", ".class").contains(ext);
     }
 
-    /**
-     * Calls LLM to analyze the project files.
-     */
-    private ProjectAnalysis analyzeWithLLM(String projectIdentifier, String fileContents, List<String> detectedTechnologies) {
-        String technologiesHint = detectedTechnologies.isEmpty()
-            ? ""
-            : "\n\nPre-detected technologies: " + String.join(", ", detectedTechnologies);
+    private String getFileExtension(String fileName) {
+        int dotIndex = fileName.lastIndexOf('.');
+        return dotIndex >= 0 ? fileName.substring(dotIndex).toLowerCase() : "";
+    }
 
+    /**
+     * Calls LLM to analyze accumulated file contents.
+     * LLM decides if more files are needed.
+     */
+    private LlmIterativeResponse analyzeIncremental(
+        String projectIdentifier, String accumulatedContext, int filesRead
+    ) {
         try {
             var response = retryableChat.chat(
                 SystemMessage.from("""
-                    You are a software project analyst. Analyze the provided code project and extract:
+                    You are a software project analyst analyzing a project ITERATIVELY.
 
-                    1. Project name (from README, package.json, pom.xml, or repository name)
-                    2. A concise description (2-3 sentences)
-                    3. All technologies used (languages, frameworks, libraries, tools)
-                    4. Keywords/topics that describe the project (e.g. "RAG", "Agent", "REST API", "Microservice")
-                    5. Key dependencies (library names)
-                    6. Architecture summary (2-3 sentences describing the overall structure)
-                    7. Key files with brief descriptions (max 10 files)
+                    You receive file contents ONE AT A TIME. After each file, decide:
+
+                    **If you have enough information:**
+                    - Set "sufficient": true
+                    - Provide complete analysis with all fields
+
+                    **If you need more information:**
+                    - Set "sufficient": false
+                    - Explain what's missing in "reason"
+                    - Suggest what type of file to read next in "nextFileHint"
+                    - Still provide your best analysis so far (partial)
 
                     Respond ONLY in the following JSON format:
                     {
-                      "projectName": "Project Name",
-                      "description": "Description...",
-                      "technologies": ["Java", "Quarkus", "LangChain4j"],
-                      "keywords": ["RAG", "Agent", "Wiki"],
-                      "dependencies": ["langchain4j", "jsoup"],
-                      "architectureSummary": "Summary...",
-                      "keyFiles": {"Main.java": "Entry point for the application"}
+                      "sufficient": true/false,
+                      "reason": "Why you need more info (or empty if sufficient)",
+                      "nextFileHint": "e.g. 'build file for dependencies' or 'architecture docs'",
+                      "analysis": {
+                        "projectName": "Project Name",
+                        "description": "2-3 sentences...",
+                        "technologies": ["Java", "Quarkus"],
+                        "keywords": ["RAG", "Agent", "Wiki"],
+                        "dependencies": ["langchain4j", "jsoup"],
+                        "architectureSummary": "2-3 sentences...",
+                        "keyFiles": {"Main.java": "Entry point"}
+                      }
                     }
+
+                    Note: For a typical project, README.md alone often provides enough information.
+                    Only request more files if critical details (dependencies, architecture) are missing.
                     """),
-                UserMessage.from("Project identifier: " + projectIdentifier
-                    + technologiesHint
-                    + "\n\nProject files:\n" + fileContents)
+                UserMessage.from("""
+                    Project: %s
+                    Files read so far: %d
+
+                    %s
+
+                    Do you have enough information to complete the analysis?
+                    """.formatted(projectIdentifier, filesRead, accumulatedContext))
             );
 
             String json = response.aiMessage().text();
-            return parseProjectAnalysisJson(json, projectIdentifier);
+            return parseLlmIterativeResponse(json, projectIdentifier);
 
         } catch (Exception e) {
-            log.error("LLM project analysis failed", e);
-            return ProjectAnalysis.empty();
+            log.error("LLM incremental analysis failed", e);
+            return new LlmIterativeResponse(true, "", "", ProjectAnalysis.empty());
         }
+    }
+
+    private LlmIterativeResponse parseLlmIterativeResponse(String json, String projectIdentifier) {
+        try {
+            boolean sufficient = extractJsonBoolean(json, "sufficient");
+            String reason = extractJsonValue(json, "reason");
+            String nextFileHint = extractJsonValue(json, "nextFileHint");
+
+            // Parse nested analysis object
+            int analysisStart = json.indexOf("\"analysis\"");
+            ProjectAnalysis analysis = ProjectAnalysis.empty();
+
+            if (analysisStart >= 0) {
+                int braceStart = json.indexOf("{", analysisStart);
+                int braceEnd = findMatchingBrace(json, braceStart);
+                if (braceStart >= 0 && braceEnd >= 0) {
+                    String inner = json.substring(braceStart, braceEnd + 1);
+                    analysis = parseProjectAnalysisJson(inner, projectIdentifier);
+                }
+            }
+
+            return new LlmIterativeResponse(sufficient, reason, nextFileHint, analysis);
+
+        } catch (Exception e) {
+            log.warn("JSON parsing failed for LLM iterative response", e);
+            return new LlmIterativeResponse(true, "", "", ProjectAnalysis.empty());
+        }
+    }
+
+    private boolean extractJsonBoolean(String json, String key) {
+        int start = json.indexOf("\"" + key + "\"");
+        if (start == -1) return true;
+        start = json.indexOf(":", start) + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+        if (start >= json.length()) return true;
+
+        if (json.startsWith("true", start)) return true;
+        if (json.startsWith("false", start)) return false;
+        return true;
     }
 
     private ProjectAnalysis parseProjectAnalysisJson(String json, String projectIdentifier) {
         try {
-            // Simple manual JSON parsing (same approach as IngestService)
             String projectName = extractJsonValue(json, "projectName");
             String description = extractJsonValue(json, "description");
             List<String> technologies = extractJsonList(json, "technologies");
@@ -441,7 +563,6 @@ public class ProjectAnalysisService {
             List<String> dependencies = extractJsonList(json, "dependencies");
             String architectureSummary = extractJsonValue(json, "architectureSummary");
 
-            // Parse keyFiles map (simplified)
             Map<String, String> keyFiles = new LinkedHashMap<>();
             int start = json.indexOf("\"keyFiles\"");
             if (start >= 0) {
@@ -480,11 +601,23 @@ public class ProjectAnalysisService {
         return -1;
     }
 
+    private int findMatchingBracket(String json, int start) {
+        int depth = 0;
+        for (int i = start; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '[') depth++;
+            else if (c == ']') {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
     private String extractJsonValue(String json, String key) {
         int start = json.indexOf("\"" + key + "\"");
         if (start == -1) return "";
         start = json.indexOf(":", start) + 1;
-        // Skip whitespace
         while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
         if (start >= json.length()) return "";
 
@@ -513,19 +646,6 @@ public class ProjectAnalysisService {
             result.add(matcher.group(1));
         }
         return result;
-    }
-
-    private int findMatchingBracket(String json, int start) {
-        int depth = 0;
-        for (int i = start; i < json.length(); i++) {
-            char c = json.charAt(i);
-            if (c == '[') depth++;
-            else if (c == ']') {
-                depth--;
-                if (depth == 0) return i;
-            }
-        }
-        return -1;
     }
 
     /**
@@ -623,7 +743,6 @@ public class ProjectAnalysisService {
             WikiPage existing = wikiFileService.readPage(keywordSlug);
 
             if (existing == null) {
-                // Only create if not already a concept page
                 String keywordContent = "# %s\n\nKeyword/Topic mentioned in projects.\n\n## Related Projects\n- [[%s]]".formatted(
                     keyword, projectSlug
                 );
@@ -652,9 +771,6 @@ public class ProjectAnalysisService {
      * Updates the wiki index to include projects and technologies.
      */
     private void updateProjectIndex() throws IOException {
-        String currentIndex = wikiFileService.readIndex();
-
-        // Rebuild index with project and technology sections
         StringBuilder index = new StringBuilder("# Wiki Index\n\n");
 
         String[] categories = {"entity", "concept", "project", "technology", "source-summary", "analysis"};
@@ -708,22 +824,14 @@ public class ProjectAnalysisService {
     }
 
     /**
-     * Recursively deletes a directory.
+     * LLM response for iterative analysis.
      */
-    private void deleteDirectory(Path dir) throws IOException {
-        if (Files.exists(dir)) {
-            try (Stream<Path> walk = Files.walk(dir)) {
-                walk.sorted(Comparator.reverseOrder())
-                    .forEach(path -> {
-                        try {
-                            Files.delete(path);
-                        } catch (IOException e) {
-                            log.warn("Failed to delete: {}", path, e);
-                        }
-                    });
-            }
-        }
-    }
+    record LlmIterativeResponse(
+        boolean sufficient,
+        String reason,
+        String nextFileHint,
+        ProjectAnalysis analysis
+    ) {}
 
     public record AnalysisResult(
         ProjectAnalysis analysis,

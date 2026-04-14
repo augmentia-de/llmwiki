@@ -72,6 +72,23 @@
         .badge-category { font-size: 0.75rem; }
         .loading { opacity: 0.6; }
         .loading::after { content: " ⏳"; }
+        .btn-delete-page {
+            padding: 0 6px;
+            font-size: 1.1rem;
+            line-height: 1;
+            border-radius: 4px;
+        }
+        .sort-header {
+            cursor: pointer;
+            user-select: none;
+        }
+        .sort-header:hover {
+            background: #f0f0f0;
+        }
+        .sort-arrow {
+            font-size: 0.75rem;
+            margin-left: 4px;
+        }
     </style>
 </head>
 <body>
@@ -212,6 +229,11 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 const API = '';
+
+// Pages sorting state
+let currentPages = [];
+let currentSortColumn = null;  // 'title', 'category', 'slug', 'updated'
+let currentSortAsc = true;
 
 // ─── File Tree ────────────────────────────────────────────────────────
 async function loadFileTree() {
@@ -413,33 +435,130 @@ async function loadPages() {
     try {
         const res = await fetch(`${API}/wiki`);
         if (!res.ok) throw new Error('Failed');
-        const pages = await res.json();
-        if (pages.length === 0) {
+        currentPages = await res.json();
+        if (currentPages.length === 0) {
             container.innerHTML = '<div class="text-muted">No pages yet. Ingest a source to get started!</div>';
             return;
         }
-        let html = '<div class="table-responsive"><table class="table table-sm table-hover">';
-        html += '<thead><tr><th>Title</th><th>Category</th><th>Slug</th><th>Updated</th></tr></thead><tbody>';
-        for (const p of pages) {
-            const badgeClass = {
-                'entity': 'bg-primary',
-                'concept': 'bg-success',
-                'project': 'bg-info',
-                'technology': 'bg-warning text-dark',
-                'source-summary': 'bg-secondary',
-                'analysis': 'bg-dark'
-            }[p.category] || 'bg-secondary';
-            html += `<tr>
-                <td><strong>${p.title}</strong></td>
-                <td><span class="badge ${badgeClass} badge-category">${p.category}</span></td>
-                <td><code>${p.slug}</code></td>
-                <td>${p.updated || p.created || '-'}</td>
-            </tr>`;
+        // Default sort by title
+        if (currentSortColumn === null) {
+            currentSortColumn = 'title';
+            currentSortAsc = true;
         }
-        html += '</tbody></table></div>';
-        container.innerHTML = html;
+        renderPages(container);
     } catch (e) {
         container.innerHTML = '<div class="text-danger">Error loading</div>';
+    }
+}
+
+function renderPages(container) {
+    const pages = [...currentPages];
+
+    // Sort
+    pages.sort((a, b) => {
+        let va, vb;
+        switch (currentSortColumn) {
+            case 'title': va = (a.title || '').toLowerCase(); vb = (b.title || '').toLowerCase(); break;
+            case 'category': va = (a.category || '').toLowerCase(); vb = (b.category || '').toLowerCase(); break;
+            case 'slug': va = (a.slug || '').toLowerCase(); vb = (b.slug || '').toLowerCase(); break;
+            case 'updated': va = a.updated || a.created || ''; vb = b.updated || b.created || ''; break;
+            default: va = (a.title || '').toLowerCase(); vb = (b.title || '').toLowerCase();
+        }
+        if (va < vb) return currentSortAsc ? -1 : 1;
+        if (va > vb) return currentSortAsc ? 1 : -1;
+        return 0;
+    });
+
+    const sortIcon = (col) => {
+        if (currentSortColumn !== col) return 'text-muted';
+        return currentSortAsc ? 'text-primary' : 'text-primary';
+    };
+    const sortArrow = (col) => {
+        if (currentSortColumn !== col) return '↕';
+        return currentSortAsc ? '▲' : '▼';
+    };
+
+    let html = '<div class="table-responsive"><table class="table table-sm table-hover">';
+    html += '<thead><tr>';
+    html += `<th class="sort-header" data-sort="title">Title <span class="sort-arrow ${sortIcon('title')}">${sortArrow('title')}</span></th>`;
+    html += `<th class="sort-header" data-sort="category">Category <span class="sort-arrow ${sortIcon('category')}">${sortArrow('category')}</span></th>`;
+    html += `<th class="sort-header" data-sort="slug">Slug <span class="sort-arrow ${sortIcon('slug')}">${sortArrow('slug')}</span></th>`;
+    html += `<th class="sort-header" data-sort="updated">Updated <span class="sort-arrow ${sortIcon('updated')}">${sortArrow('updated')}</span></th>`;
+    html += '<th></th>';
+    html += '</tr></thead><tbody>';
+
+    for (const p of pages) {
+        const badgeClass = {
+            'entity': 'bg-primary',
+            'concept': 'bg-success',
+            'project': 'bg-info',
+            'technology': 'bg-warning text-dark',
+            'source-summary': 'bg-secondary',
+            'analysis': 'bg-dark'
+        }[p.category] || 'bg-secondary';
+        html += `<tr id="page-row-${p.slug}">
+            <td><strong>${p.title}</strong></td>
+            <td><span class="badge ${badgeClass} badge-category">${p.category}</span></td>
+            <td><code>${p.slug}</code></td>
+            <td>${p.updated || p.created || '-'}</td>
+            <td><button class="btn btn-sm btn-outline-danger btn-delete-page" data-slug="${p.slug}" data-title="${p.title}" title="Löschen">&times;</button></td>
+        </tr>`;
+    }
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+
+    // Sort header clicks
+    document.querySelectorAll('.sort-header').forEach(th => {
+        th.addEventListener('click', () => {
+            const col = th.dataset.sort;
+            if (currentSortColumn === col) {
+                currentSortAsc = !currentSortAsc;
+            } else {
+                currentSortColumn = col;
+                currentSortAsc = true;
+            }
+            renderPages(container);
+        });
+    });
+
+    // Delete buttons binden
+    document.querySelectorAll('.btn-delete-page').forEach(btn => {
+        btn.addEventListener('click', handleDeletePage);
+    });
+}
+
+// ─── Delete Page ──────────────────────────────────────────────────────
+async function handleDeletePage(event) {
+    const btn = event.currentTarget;
+    const slug = btn.dataset.slug;
+    const title = btn.dataset.title;
+
+    if (!confirm(`Seite "${title}" (${slug}) wirklich löschen?\n\nDies kann nicht rückgängig gemacht werden.`)) {
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '…';
+
+    try {
+        const res = await fetch(`${API}/wiki/${slug}`, { method: 'DELETE' });
+        if (res.ok) {
+            const row = document.getElementById(`page-row-${slug}`);
+            if (row) row.style.opacity = '0.4';
+            btn.textContent = '✓';
+            btn.classList.remove('btn-outline-danger');
+            btn.classList.add('btn-success');
+            setTimeout(() => loadPages(), 800);
+        } else {
+            const data = await res.json();
+            alert(`Fehler: ${data.error || 'Löschen fehlgeschlagen'}`);
+            btn.disabled = false;
+            btn.textContent = '×';
+        }
+    } catch (e) {
+        alert(`Fehler: ${e.message}`);
+        btn.disabled = false;
+        btn.textContent = '×';
     }
 }
 
