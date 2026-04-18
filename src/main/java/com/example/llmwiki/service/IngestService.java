@@ -53,6 +53,10 @@ public class IngestService {
     public IngestResult ingest(String url) throws IOException {
         log.info("Starting ingest: {}", url);
 
+        if (url.startsWith("internal://")) {
+            return ingestFromNormalizedSource(url);
+        }
+
         // 1. Load source
         String html = Jsoup.connect(url).timeout(30_000).get().html();
         String text = Jsoup.parse(html).body().text();
@@ -80,6 +84,166 @@ public class IngestService {
 
         log.info("Ingest complete: {} touched {} pages", title, pagesTouched);
         return new IngestResult(title, pagesTouched, analysis);
+    }
+
+    public IngestResult ingestFromNormalizedSource(String syntheticUrl) throws IOException {
+        String sourceId = syntheticUrl.replace("internal://", "");
+        log.info("Processing normalized source: {}", sourceId);
+
+        throw new IOException("Normalized source processing not yet implemented - use text ingest");
+    }
+
+    public IngestResult ingestText(String text, String title, String sourceType) throws IOException {
+        log.info("Starting text ingest: title={}", title);
+
+        if (text == null || text.isBlank()) {
+            throw new IOException("Text content is empty");
+        }
+
+        String effectiveTitle = title != null && !title.isBlank() ? title : extractTitleFromText(text);
+        String sourceId = generateSourceId(text);
+        String timestamp = java.time.LocalDate.now().toString();
+
+        LlmAnalysis analysis = analyzeSource(effectiveTitle, text);
+
+        String sourceUrl = "internal://text/" + wikiFileService.slugify(effectiveTitle);
+        wikiFileService.saveRawSource(sourceUrl, text.substring(0, Math.min(text.length(), 50000)));
+
+        int pagesTouched = updateWikiWithTimeline(analysis, sourceUrl, text, sourceId, timestamp);
+
+        String logEntry = "## [%s] text ingest | %s\nSource: %s | %d pages updated | Entities: %s | Concepts: %s"
+            .formatted(java.time.LocalDate.now(), effectiveTitle, sourceUrl, pagesTouched,
+                String.join(", ", analysis.entities().keySet()),
+                String.join(", ", analysis.concepts().keySet()));
+        wikiFileService.appendToLog(logEntry);
+
+        log.info("Text ingest complete: {} touched {} pages", effectiveTitle, pagesTouched);
+        return new IngestResult(effectiveTitle, pagesTouched, analysis);
+    }
+
+    private int updateWikiWithTimeline(LlmAnalysis analysis, String sourceUrl, String rawText, String sourceId, String timestamp) throws IOException {
+        int pagesTouched = 0;
+        String sourceSlug = wikiFileService.slugify(sourceUrl);
+
+        for (var entry : analysis.entities().entrySet()) {
+            String slug = wikiFileService.slugify(entry.getKey());
+            WikiPage existing = wikiFileService.readPage(slug);
+
+            String timelineEntry = String.format("""
+                ### Eintrag [%s]
+                - **Datum:** %s
+                - **Bezug:** %s
+                - **Quelle:** [[source-%s]]
+
+                %s
+                """, sourceId, timestamp, entry.getValue(), sourceSlug, rawText);
+
+            if (existing != null) {
+                String updatedContent = existing.content() + "\n\n---\n" + timelineEntry;
+                WikiPage updated = new WikiPage(
+                    existing.slug(), existing.title(), existing.category(),
+                    updatedContent, mergeSources(existing.sources(), sourceUrl),
+                    existing.created(), LocalDate.now().toString()
+                );
+                wikiFileService.writePage(updated);
+            } else {
+                String initialContent = String.format("""
+                    **Kategorie:** entity
+
+                    ## Zusammenfassung
+
+                    %s
+
+                    ---
+
+                    ## Timeline
+                    %s
+                    """, entry.getValue(), timelineEntry);
+
+                WikiPage newPage = new WikiPage(
+                    slug, entry.getKey().replace("-", " ").toUpperCase(),
+                    "entity",
+                    initialContent,
+                    List.of(sourceUrl),
+                    LocalDate.now().toString(), null
+                );
+                wikiFileService.writePage(newPage);
+            }
+            pagesTouched++;
+        }
+
+        for (var entry : analysis.concepts().entrySet()) {
+            String slug = wikiFileService.slugify(entry.getKey());
+            WikiPage existing = wikiFileService.readPage(slug);
+
+            String timelineEntry = String.format("""
+                ### Eintrag [%s]
+                - **Datum:** %s
+                - **Bezug:** %s
+
+                %s
+                """, sourceId, timestamp, entry.getValue(), rawText);
+
+            if (existing != null) {
+                String updatedContent = existing.content() + "\n\n---\n" + timelineEntry;
+                WikiPage updated = new WikiPage(
+                    existing.slug(), existing.title(), existing.category(),
+                    updatedContent, mergeSources(existing.sources(), sourceUrl),
+                    existing.created(), LocalDate.now().toString()
+                );
+                wikiFileService.writePage(updated);
+            } else {
+                String initialContent = String.format("""
+                    **Kategorie:** concept
+
+                    ## Zusammenfassung
+
+                    %s
+
+                    ---
+
+                    ## Timeline
+                    %s
+                    """, entry.getValue(), timelineEntry);
+
+                WikiPage newPage = new WikiPage(
+                    slug, entry.getKey().replace("-", " ").toUpperCase(),
+                    "concept",
+                    initialContent,
+                    List.of(sourceUrl),
+                    LocalDate.now().toString(), null
+                );
+                wikiFileService.writePage(newPage);
+            }
+            pagesTouched++;
+        }
+
+        return pagesTouched;
+    }
+
+    private String generateSourceId(String text) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            String hashStr = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
+            return hashStr.substring(0, 8);
+        } catch (Exception e) {
+            return java.util.UUID.randomUUID().toString().substring(0, 8);
+        }
+    }
+
+    private String extractTitleFromText(String text) {
+        String[] lines = text.split("\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty() && trimmed.length() > 3) {
+                if (trimmed.length() > 60) {
+                    trimmed = trimmed.substring(0, 60);
+                }
+                return trimmed;
+            }
+        }
+        return "Untitled Note";
     }
 
     /**

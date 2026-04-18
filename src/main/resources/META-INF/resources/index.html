@@ -89,6 +89,25 @@
             font-size: 0.75rem;
             margin-left: 4px;
         }
+        .conflict-card {
+            border-left: 5px solid #ffc107;
+            background-color: #fffdf5;
+            transition: transform 0.2s ease-in-out;
+        }
+        .conflict-card:hover {
+            transform: scale(1.01);
+        }
+        .claim-source-tag {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background-color: #e9ecef;
+            color: #495057;
+            text-decoration: none;
+        }
+        .claim-source-tag:hover {
+            background-color: #dee2e6;
+        }
     </style>
 </head>
 <body>
@@ -140,18 +159,56 @@
                 <i class="bi bi-shield-check"></i> Lint
             </button>
         </li>
+        <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-review" type="button" id="review-tab-btn">
+                <i class="bi bi-exclamation-triangle"></i> Review
+            </button>
+        </li>
     </ul>
 
     <div class="tab-content">
         <!-- Ingest Tab -->
         <div class="tab-pane fade show active" id="tab-ingest">
             <h5><i class="bi bi-cloud-arrow-up"></i> Ingest Source</h5>
-            <p class="text-muted">Enter a URL — the app fetches it, analyzes with the LLM, and updates the wiki.</p>
-            <div class="input-group mb-3">
-                <input type="url" class="form-control" id="ingest-url" placeholder="https://example.com/article" value="">
-                <button class="btn btn-primary" type="button" id="ingest-btn">
-                    <i class="bi bi-play-fill"></i> Ingest
-                </button>
+            <ul class="nav nav-pills mb-3" id="ingest-type" role="tablist">
+                <li class="nav-item">
+                    <button class="nav-link active" data-bs-toggle="pill" data-bs-target="#ingest-url-panel" type="button">URL</button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" data-bs-toggle="pill" data-bs-target="#ingest-text-panel" type="button">Text</button>
+                </li>
+            </ul>
+
+            <div class="tab-content">
+                <div class="tab-pane fade show active" id="ingest-url-panel">
+                    <p class="text-muted">Enter a URL — the app fetches it, analyzes with the LLM, and updates the wiki.</p>
+                    <div class="input-group mb-3">
+                        <input type="url" class="form-control" id="ingest-url" placeholder="https://example.com/article" value="">
+                        <button class="btn btn-primary" type="button" id="ingest-url-btn">
+                            <i class="bi bi-play-fill"></i> Ingest
+                        </button>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="ingest-text-panel">
+                    <p class="text-muted">Paste or type text to create wiki entries from your notes.</p>
+                    <div class="mb-2">
+                        <input type="text" class="form-control" id="ingest-text-title" placeholder="Title (optional)">
+                    </div>
+                    <div class="mb-2">
+                        <select class="form-select" id="ingest-text-type">
+                            <option value="note">Note</option>
+                            <option value="email">E-Mail</option>
+                            <option value="clipboard">Clipboard</option>
+                            <option value="meeting">Meeting Notes</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <textarea class="form-control" id="ingest-text" rows="8" placeholder="Paste or type your text here..."></textarea>
+                    </div>
+                    <button class="btn btn-primary" type="button" id="ingest-text-btn">
+                        <i class="bi bi-play-fill"></i> Process Text
+                    </button>
+                </div>
             </div>
             <div id="ingest-result"></div>
         </div>
@@ -200,6 +257,26 @@
             <p class="text-muted">Checks for orphaned pages, missing entries, and improvement suggestions.</p>
             <button class="btn btn-outline-primary mb-3" id="lint-btn"><i class="bi bi-play-fill"></i> Run Lint</button>
             <div id="lint-result"></div>
+        </div>
+
+        <!-- Review Tab (HITL) -->
+        <div class="tab-pane fade" id="tab-review">
+            <h5><i class="bi bi-exclamation-triangle"></i> Pending Reviews (HITL)</h5>
+            <p class="text-muted">Claims that need human verification before being added to the wiki.</p>
+            <div class="card mt-3 conflict-card" id="review-card" style="display:none;">
+                <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+                    <strong>⚠️ Offene Recherchen & Konflikte</strong>
+                    <span class="badge bg-dark" id="review-count">0</span>
+                </div>
+                <div class="card-body">
+                    <div id="review-list" class="list-group">
+                        <div class="text-muted small">Lade ausstehende Verifizierungen...</div>
+                    </div>
+                </div>
+            </div>
+            <div id="review-empty" class="text-muted mt-3">
+                <i class="bi bi-check-circle"></i> Alle Claims verifiziert. Keine offenen Konflikte.
+            </div>
         </div>
     </div>
 </div>
@@ -273,11 +350,11 @@ async function loadFile(path, el) {
 }
 
 // ─── Ingest ───────────────────────────────────────────────────────────
-document.getElementById('ingest-btn').addEventListener('click', async () => {
+document.getElementById('ingest-url-btn').addEventListener('click', async () => {
     const url = document.getElementById('ingest-url').value.trim();
     if (!url) return alert('Please enter a URL');
 
-    const btn = document.getElementById('ingest-btn');
+    const btn = document.getElementById('ingest-url-btn');
     btn.disabled = true;
     btn.classList.add('loading');
     document.getElementById('ingest-result').innerHTML = '<div class="text-muted">Ingest running...</div>';
@@ -297,6 +374,48 @@ document.getElementById('ingest-btn').addEventListener('click', async () => {
                     <hr>
                     ${data.summary || ''}
                 </div>`;
+            loadFileTree();
+            loadPages();
+        } else {
+            document.getElementById('ingest-result').innerHTML = `<div class="result-box text-danger">❌ ${data.error}</div>`;
+        }
+    } catch (e) {
+        document.getElementById('ingest-result').innerHTML = `<div class="result-box text-danger">❌ ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+    }
+});
+
+document.getElementById('ingest-text-btn').addEventListener('click', async () => {
+    const text = document.getElementById('ingest-text').value.trim();
+    if (!text) return alert('Please enter some text');
+
+    const title = document.getElementById('ingest-text-title').value.trim();
+    const type = document.getElementById('ingest-text-type').value;
+
+    const btn = document.getElementById('ingest-text-btn');
+    btn.disabled = true;
+    btn.classList.add('loading');
+    document.getElementById('ingest-result').innerHTML = '<div class="text-muted">Processing text...</div>';
+
+    try {
+        const res = await fetch(`${API}/sources`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, title, type })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            document.getElementById('ingest-result').innerHTML = `
+                <div class="result-box">
+                    <strong>✅ ${data.title}</strong><br>
+                    Pages touched: ${data.pagesTouched}<br>
+                    <hr>
+                    ${data.summary || ''}
+                </div>`;
+            document.getElementById('ingest-text').value = '';
+            document.getElementById('ingest-text-title').value = '';
             loadFileTree();
             loadPages();
         } else {
@@ -538,6 +657,67 @@ document.getElementById('lint-btn').addEventListener('click', async () => {
         btn.classList.remove('loading');
     }
 });
+
+// ─── Review (HITL) ──────────────────────────────────────────────────────
+async function loadReviewClaims() {
+    const card = document.getElementById('review-card');
+    const empty = document.getElementById('review-empty');
+    const countBadge = document.getElementById('review-count');
+    const container = document.getElementById('review-list');
+
+    try {
+        const res = await fetch(`${API}/wiki/review`);
+        const claims = await res.json();
+
+        if (!claims || claims.length === 0) {
+            card.style.display = 'none';
+            empty.style.display = 'block';
+            return;
+        }
+
+        card.style.display = 'block';
+        empty.style.display = 'none';
+        countBadge.textContent = claims.length;
+        container.innerHTML = '';
+
+        claims.forEach((claim, index) => {
+            container.innerHTML += `
+                <div class="list-group-item border-start border-warning border-4 mb-2">
+                    <div class="d-flex justify-content-between">
+                        <h6 class="mb-1">Thema: ${claim.subject || 'Unknown'}</h6>
+                        ${claim.sourceUrl ? `<small class="claim-source-tag"><a href="${claim.sourceUrl}" target="_blank">Quelle</a></small>` : ''}
+                    </div>
+                    <p class="mb-1 text-danger"><strong>Behauptung:</strong> ${claim.assertion || '-'}</p>
+                    <div class="mt-2">
+                        <button class="btn btn-sm btn-success" onclick="resolveClaim(${index}, 'ACCEPT')">Übernehmen</button>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="resolveClaim(${index}, 'REJECT')">Ignorieren</button>
+                    </div>
+                </div>`;
+        });
+    } catch (e) {
+        console.error("Fehler beim Laden der Reviews", e);
+    }
+}
+
+async function resolveClaim(index, action) {
+    if (!confirm(`Claim ${action === 'ACCEPT' ? 'übernehmen' : 'ignorieren'}?`)) return;
+
+    try {
+        const res = await fetch(`${API}/wiki/review/resolve?id=${index}&action=${action}`, {
+            method: 'POST'
+        });
+        if (res.ok) {
+            loadReviewClaims();
+            loadFileTree();
+        } else {
+            alert('Fehler beim Auflösen des Claims');
+        }
+    } catch (e) {
+        alert('Fehler: ' + e.message);
+    }
+}
+
+document.getElementById('review-tab-btn').addEventListener('click', loadReviewClaims);
 
 // ─── Init ─────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {

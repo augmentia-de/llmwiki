@@ -1,6 +1,7 @@
 package com.example.llmwiki.service;
 
 import com.example.llmwiki.config.WikiConfig;
+import com.example.llmwiki.model.Claim;
 import com.example.llmwiki.model.WikiPage;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -309,5 +310,146 @@ public class WikiFileService {
         }
 
         return nodes;
+    }
+
+    // ─── HITL Review ───────────────────────────────────────────────────────────
+
+    public List<Claim> readPendingClaims() {
+        Path path = wikiDir.resolve("needs_review.md");
+        if (!Files.exists(path)) return List.of();
+
+        try {
+            String content = Files.readString(path);
+            return parseClaimsFromMarkdown(content);
+        } catch (IOException e) {
+            log.error("Failed to read review log", e);
+            return List.of();
+        }
+    }
+
+    public void appendToReviewLog(String title, String claimsJson) {
+        try {
+            Path reviewFile = wikiDir.resolve("needs_review.md");
+            String entry = """
+
+                ## %s
+
+                ```json
+                %s
+                ```
+                """.formatted(title, claimsJson);
+
+            Files.writeString(reviewFile, Files.readString(reviewFile) + entry, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            log.debug("Claim appended to review log for: {}", title);
+        } catch (IOException e) {
+            log.error("Failed to append to review log", e);
+        }
+    }
+
+    public void resolveClaim(int claimId, String action) {
+        List<Claim> allClaims = readPendingClaims();
+        if (claimId < 0 || claimId >= allClaims.size()) {
+            log.warn("Invalid claim id: {}", claimId);
+            return;
+        }
+
+        Claim target = allClaims.get(claimId);
+
+        if ("ACCEPT".equals(action)) {
+            applyFactToWikiPage(target.subject(), target.assertion());
+            log.info("Claim ACCEPTED: {}", target.subject());
+        } else if ("REJECT".equals(action)) {
+            log.info("Claim REJECTED: {}", target.subject());
+        }
+
+        allClaims.remove(claimId);
+        saveClaimsToMarkdown(allClaims);
+
+        try {
+            appendToLog("HITL: Claim " + action + " for " + target.subject());
+        } catch (IOException e) {
+            log.error("Failed to log claim resolution", e);
+        }
+    }
+
+    private void applyFactToWikiPage(String subject, String assertion) {
+        try {
+            WikiPage page = readPage(subject);
+            if (page != null) {
+                String updated = page.content() + "\n\n## Verified\n\n" + assertion;
+                WikiPage updatedPage = new WikiPage(
+                    page.slug(), page.title(), page.category(),
+                    updated, page.sources(),
+                    page.created(), LocalDate.now().toString()
+                );
+                writePage(updatedPage);
+            }
+        } catch (IOException e) {
+            log.error("Failed to apply fact", e);
+        }
+    }
+
+    private List<Claim> parseClaimsFromMarkdown(String content) {
+        List<Claim> claims = new ArrayList<>();
+        if (content == null || content.isEmpty()) return claims;
+
+        try {
+            String[] sections = content.split("## ");
+            for (String section : sections) {
+                if (section.contains("```json")) {
+                    String jsonPart = section.split("```json")[1].split("```")[0].trim();
+                    if (!jsonPart.isEmpty() && !jsonPart.equals("[]")) {
+                        claims.add(parseClaim(jsonPart));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to parse claims from markdown", e);
+        }
+        return claims;
+    }
+
+    private Claim parseClaim(String json) {
+        try {
+            String subject = extractValue(json, "subject");
+            String assertion = extractValue(json, "assertion");
+            String sourceUrl = extractValue(json, "sourceUrl");
+            String status = extractValue(json, "status");
+
+            return new Claim(subject, assertion, "", sourceUrl, status, List.of());
+        } catch (Exception e) {
+            return new Claim("unknown", json, "", "", "PENDING", List.of());
+        }
+    }
+
+    private String extractValue(String json, String key) {
+        int start = json.indexOf("\"" + key + "\"");
+        if (start == -1) return "";
+        start = json.indexOf(":", start) + 1;
+        start = json.indexOf("\"", start) + 1;
+        int end = json.indexOf("\"", start);
+        return json.substring(start, end);
+    }
+
+    private void saveClaimsToMarkdown(List<Claim> claims) {
+        try {
+            StringBuilder sb = new StringBuilder("# Pending Reviews\n\n");
+            for (Claim claim : claims) {
+                sb.append("## ").append(claim.subject()).append("\n\n");
+                sb.append("```json\n");
+                sb.append(String.format("""
+                    {
+                      "subject": "%s",
+                      "assertion": "%s",
+                      "sourceUrl": "%s",
+                      "status": "PENDING"
+                    }
+                    """, claim.subject(), claim.assertion(), claim.sourceUrl()));
+                sb.append("```\n\n");
+            }
+            Files.writeString(wikiDir.resolve("needs_review.md"), sb.toString());
+        } catch (IOException e) {
+            log.error("Failed to save claims", e);
+        }
     }
 }

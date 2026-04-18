@@ -1,5 +1,6 @@
 package com.example.llmwiki.resource;
 
+import com.example.llmwiki.model.Claim;
 import com.example.llmwiki.model.WikiPage;
 import com.example.llmwiki.service.FileNode;
 import com.example.llmwiki.service.WikiFileService;
@@ -193,6 +194,32 @@ public class WikiResource {
                 node.name(), node.path(), node.type(),
                 node.children() != null ? node.children().stream().map(FileNodeAlias::fromFileNode).toList() : List.of()
             );
+        }
+    }
+
+    // ─── Review (HITL) API ────────────────────────────────────────────────
+
+    @GET
+    @Path("/review")
+    public Response getPendingClaims() {
+        try {
+            List<Claim> claims = wikiFileService.readPendingClaims();
+            return Response.ok(claims).build();
+        } catch (Exception e) {
+            return Response.status(500).entity(Map.of("error", e.getMessage())).build();
+        }
+    }
+
+    @POST
+    @Path("/review/resolve")
+    public Response resolveClaim(
+            @QueryParam("id") int id,
+            @QueryParam("action") String action) {
+        try {
+            wikiFileService.resolveClaim(id, action);
+            return Response.ok(Map.of("status", "resolved", "id", id, "action", action)).build();
+        } catch (Exception e) {
+            return Response.status(500).entity(Map.of("error", e.getMessage())).build();
         }
     }
 }
